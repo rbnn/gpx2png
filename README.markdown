@@ -11,3 +11,6 @@ To produce the above image from <b>example.kmz</b>, run <code><kbd>./gpx2png.py 
 TODO: this was made before the OSM move to a new licence, and needs further
 work to support extra file types - as it appears the kml output from Tracks on
 Android is not compatible with gpsbabel.
+
+Requirements:
+  Pillow (http://pillow.readthedocs.io/en/3.1.x/index.html)
