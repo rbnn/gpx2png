@@ -19,7 +19,7 @@
 
 """
 
-import Image, ImageDraw
+from PIL import Image, ImageDraw
 import math, os, sys
 import urllib
 import zipfile
