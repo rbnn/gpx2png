@@ -1,65 +1,176 @@
-#! /usr/bin/python
-# -*- coding: utf-8 -*-
-"""
-	© 2015 John Drinkwater <john@nextraweb.com>
-	http://johndrinkwater.name/code/gpx2png/
+#!/usr/bin/env python
+# coding: utf8
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
-"""
-
-from optparse import OptionParser
+import pandas as pd
+import numpy as np
+import os
+import datetime
+from xml.dom.minidom import parse
 import logging as log
-import gpx
+from itertools import product
+from urllib import urlretrieve
+from PIL import Image, ImageDraw
 
-# need to include CC notice if we use tiles
-cnotice = "CC BY-SA OpenStreetMap"
 
-# variables
-__version__ = 0.50
+def loadFromFile(path):
+  #{{{
+  assert os.path.splitext(path)[1] == '.gpx'
+  log.info('Loading file: %s' % path)
 
-# XXX we are just using defaults now
+  dom = parse(path)
+  tmp = dom.getElementsByTagName('trkpt')
 
-if __name__ == "__main__":
+  return pd.DataFrame(dict(
+    lat = map(lambda x: float(x.getAttribute('lat')), tmp),
+    lon = map(lambda x: float(x.getAttribute('lon')), tmp),
+    ),
+    index = map(lambda x: datetime.datetime.strptime(
+        x.getElementsByTagName('time')[0].firstChild.nodeValue,
+        '%Y-%m-%dT%H:%M:%SZ'),
+      tmp)
+  )
+  #}}}
 
-	# Now support CLI arguments!
-	parser = OptionParser(usage="usage: gpx2png.py [options] file.gpx")
-	parser.add_option("-v", "--verbose",
-			action="store_true", dest="verbose", default=False,
-			help="output progress messages to stdout")
-	parser.add_option("-o", "--output",
-			action="store", dest="filename", default='',
-			help="filename to write the track image to")
-	parser.add_option("-b", "--background",
-			action="store_false", dest="background", default=True,
-			help="disable output of OSM tile background")
 
-	(options, args) = parser.parse_args()
-	if options.verbose: log.getLogger().setLevel(log.NOTSET)
+def loadFromMultipleFiles(paths):
+  #{{{
+  data = map(lambda x: loadFromFile(x), paths)
+  return pd.concat(data)
+  #}}}
 
-	if len(args) == 0:
-		parser.print_help()
-		sys.exit(-1)
 
-	if len(args) == 1:
-		track = gpx.loadFromFile( args[0] )
-		track.setOptions( options.__dict__ )
-		track.drawTrack()
-	else:
-		# TODO Support more than one file in the same image
-		for path in args:
-			track = gpx.loadFromFile( path )
-			track.setOptions( options.__dict__ )
-			# atm, with multiple, we just let each one output once
-			track.drawTrack()
+def getTrackTileNumbers(track, zoom):
+  #{{{
+  r_lat = np.deg2rad(track['lat'])
+  n = 2. ** zoom
+  return pd.DataFrame(dict(
+    xtile = np.array((track['lon'] + 180.) / 360. * n, dtype = float),
+    ytile = np.array((1. - np.log(np.tan(r_lat) + (1 / np.cos(r_lat))) / np.pi) / 2. * n, dtype = float),
+    ),
+    index = track.index
+  )
+  #}}}
+  
+
+def fetchTile(x, y, zoom, base = 'http://tile.openstreetmap.org', cache = 'db'):
+  #{{{
+  tile = '/'.join([base, str(zoom), str(x), str(y)]) + '.png'
+  local_dir = os.path.join(cache, str(zoom))
+  local_file = os.path.join(local_dir, 'tile_%i_%i.png' % (x, y))
+
+  if not os.path.exists(local_file):
+    log.info('Fetching tile: %s' % tile)
+    local_dir = os.path.join(cache, str(zoom))
+    if not os.path.exists(local_dir): os.mkdir(local_dir)
+    urlretrieve(tile, local_file)
+  else: log.info('Using cached tile: %s' % local_file)
+
+  return local_file
+  #}}}
+
+
+def createMap(data, opts, full = True):
+  #{{{
+  if not os.path.exists(opts['cache']):
+    log.info('Creating cache-db `%s\'...' % opts['cache'])
+    os.makedirs(opts['cache'])
+
+  # Boundaries for the image
+  x_min, x_max = (data['xtile'].min() - opts['xpad'], data['xtile'].max() + opts['xpad'])
+  y_min, y_max = (data['ytile'].min() - opts['ypad'], data['ytile'].max() + opts['ypad'])
+
+  # Create image
+  image_size = np.array((
+    opts['xsize'] * (x_max - x_min + 1),
+    opts['ysize'] * (y_max - y_min + 1)), dtype = int)
+  image = Image.new('RGB', image_size, '#ffffff')
+
+  if full:
+    for x, y in product(xrange(x_min, x_max + 1), xrange(y_min, y_max + 1)):
+      tile_fname = fetchTile(x, y, opts['zoom'] , opts['url'], opts['cache'])
+      tile = Image.open(tile_fname)
+      image.paste(tile, (opts['xsize'] * (x - x_min), opts['ysize'] * (y - y_min)))
+      del tile
+  else:
+    for idx, (x, y) in data[['xtile', 'ytile']].drop_duplicates().iterrows():
+      tile_fname = fetchTile(x, y, opts['zoom'] , opts['url'], opts['cache'])
+      tile = Image.open(tile_fname)
+      image.paste(tile, (opts['xsize'] * (x - x_min), opts['ysize'] * (y - y_min)))
+      del tile
+    
+  return image 
+  #}}}
+
+
+def drawTrack(img, data, opts):
+  #{{{
+  x_off = data['xtile'].astype(int).min() - opts['xpad']
+  y_off = data['ytile'].astype(int).min() - opts['ypad']
+  X = opts['xsize'] * (data['xtile'] - x_off)
+  Y = opts['xsize'] * (data['ytile'] - y_off)
+  gc = ImageDraw.Draw(img)
+  gc.line(zip(X, Y), fill = opts['color'], width = opts['width'])
+  #}}}
+
+
+def removeOutliersByPercentile(X, perc = 99.0):
+  #{{{
+  d_lat = X['lat'].diff().fillna(0.).abs()
+  d_lon = X['lon'].diff().fillna(0.).abs()
+  lat_99 = np.percentile(d_lat, perc)
+  lon_99 = np.percentile(d_lon, perc)
+  I_lat = (d_lat <= lat_99)
+  I_lon = (d_lon <= lon_99)
+  return X[I_lat & I_lon]
+  #}}}
+    
+
+def saveMap(img, fname):
+  #{{{
+  log.info('Writing map to file: %s' % fname)
+  base, ext = os.path.splitext(fname.lower())
+  
+  ftype = None
+  if '.png' == ext: ftype = 'PNG'
+  elif ext in ['.jpg', '.jpeg']: ftype = 'JPEG'
+  assert ftype is not None, 'Invalid image type!'
+  
+  img.save(fname, ftype)
+  return fname
+  #}}}
+
+  
+if '__main__' == __name__:
+  import sys
+  from getopt import getopt
+
+  perc = 99.0
+  fname = 'map.png'
+  options = dict(
+    url = 'http://tile.openstreetmap.org',
+    cache = 'db',
+    zoom = 10,
+    xsize = 256,
+    ysize = 256,
+    xpad = 1,
+    ypad = 1,
+    color = 'blue',
+    width = 3,
+    )
+
+  opts, args = getopt(sys.argv[1:], 'o:w:c:z:p:v')
+  for opt, val in opts:
+    if '-o' == opt: fname = val
+    elif '-w' == opt: options['width'] = int(val)
+    elif '-c' == opt: options['color'] = val
+    elif '-z' == opt: options['zoom'] = int(val)
+    elif '-p' == opt: perc = float(val)
+    elif '-v' == opt: log.getLogger().setLevel(log.INFO)
+
+  X = loadFromMultipleFiles(args)
+  X = removeOutliersByPercentile(X, perc)
+  
+  n = getTrackTileNumbers(X, options['zoom'])
+  img = createMap(n.astype(int), options)
+  drawTrack(img, n, options)
+  saveMap(img, fname)
