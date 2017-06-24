@@ -10,6 +10,7 @@ import logging as log
 from itertools import product
 from urllib import urlretrieve
 from PIL import Image, ImageDraw
+import random
 
 
 def loadFromFile(path):
@@ -52,15 +53,15 @@ def getTrackTileNumbers(track, zoom):
   #}}}
   
 
-def fetchTile(x, y, zoom, base = 'http://tile.openstreetmap.org', cache = 'db'):
+def fetchTile(x, y, zoom, opts):
   #{{{
-  tile = '/'.join([base, str(zoom), str(x), str(y)]) + '.png'
-  local_dir = os.path.join(cache, str(zoom))
+  tile = opts['url'](zoom, x, y)
+  local_dir = os.path.join(opts['cache'], str(zoom))
   local_file = os.path.join(local_dir, 'tile_%i_%i.png' % (x, y))
 
   if not os.path.exists(local_file):
     log.info('Fetching tile: %s' % tile)
-    local_dir = os.path.join(cache, str(zoom))
+    local_dir = os.path.join(opts['cache'], str(zoom))
     if not os.path.exists(local_dir): os.mkdir(local_dir)
     urlretrieve(tile, local_file)
   else: log.info('Using cached tile: %s' % local_file)
@@ -87,13 +88,13 @@ def createMap(data, opts, full = True):
 
   if full:
     for x, y in product(xrange(x_min, x_max + 1), xrange(y_min, y_max + 1)):
-      tile_fname = fetchTile(x, y, opts['zoom'] , opts['url'], opts['cache'])
+      tile_fname = fetchTile(x, y, opts['zoom'] , opts)
       tile = Image.open(tile_fname)
       image.paste(tile, (opts['xsize'] * (x - x_min), opts['ysize'] * (y - y_min)))
       del tile
   else:
     for idx, (x, y) in data[['xtile', 'ytile']].drop_duplicates().iterrows():
-      tile_fname = fetchTile(x, y, opts['zoom'] , opts['url'], opts['cache'])
+      tile_fname = fetchTile(x, y, opts['zoom'] , opts)
       tile = Image.open(tile_fname)
       image.paste(tile, (opts['xsize'] * (x - x_min), opts['ysize'] * (y - y_min)))
       del tile
@@ -107,7 +108,7 @@ def drawTrack(img, data, opts):
   x_off = data['xtile'].astype(int).min() - opts['xpad']
   y_off = data['ytile'].astype(int).min() - opts['ypad']
   X = opts['xsize'] * (data['xtile'] - x_off)
-  Y = opts['xsize'] * (data['ytile'] - y_off)
+  Y = opts['ysize'] * (data['ytile'] - y_off)
   gc = ImageDraw.Draw(img)
   gc.line(zip(X, Y), fill = opts['color'], width = opts['width'])
   #}}}
@@ -127,6 +128,7 @@ def removeOutliersByPercentile(X, perc = 99.0):
 
 def saveMap(img, fname):
   #{{{
+  assert fname is not None, 'No filename given!'
   log.info('Writing map to file: %s' % fname)
   base, ext = os.path.splitext(fname.lower())
   
@@ -139,38 +141,39 @@ def saveMap(img, fname):
   return fname
   #}}}
 
+
+def getURL_mapnik(zoom, x, y):
+  #{{{
+  assert 0 <= zoom <= 14, 'Mapnik requires zoom-levels 0...18!'
+  urls = {
+    1: 'http://tile.openstreetmap.org/%i/%i/%i.png', 
+    2: 'http://a.tile.openstreetmap.org/%i/%i/%i.png', 
+    3: 'http://b.tile.openstreetmap.org/%i/%i/%i.png', 
+    4: 'http://c.tile.openstreetmap.org/%i/%i/%i.png', 
+    }
+  i = random.randint(1, len(urls))
+  return urls[i] % (zoom, x, y)
+  #}}}
+
   
 if '__main__' == __name__:
   import sys
   from getopt import getopt
-
-  perc = 99.0
-  fname = 'map.png'
-  options = dict(
-    url = 'http://tile.openstreetmap.org',
-    cache = 'db',
-    zoom = 10,
-    xsize = 256,
-    ysize = 256,
-    xpad = 1,
-    ypad = 1,
-    color = 'blue',
-    width = 3,
-    )
+  import config
 
   opts, args = getopt(sys.argv[1:], 'o:w:c:z:p:v')
   for opt, val in opts:
-    if '-o' == opt: fname = val
-    elif '-w' == opt: options['width'] = int(val)
-    elif '-c' == opt: options['color'] = val
-    elif '-z' == opt: options['zoom'] = int(val)
-    elif '-p' == opt: perc = float(val)
+    if '-o' == opt: config.fname = val
+    elif '-w' == opt: config.options['width'] = int(val)
+    elif '-c' == opt: config.options['color'] = val
+    elif '-z' == opt: config.options['zoom'] = int(val)
+    elif '-p' == opt: config.perc = float(val)
     elif '-v' == opt: log.getLogger().setLevel(log.INFO)
 
   X = loadFromMultipleFiles(args)
-  X = removeOutliersByPercentile(X, perc)
+  X = removeOutliersByPercentile(X, config.perc)
   
-  n = getTrackTileNumbers(X, options['zoom'])
-  img = createMap(n.astype(int), options)
-  drawTrack(img, n, options)
-  saveMap(img, fname)
+  N = getTrackTileNumbers(X, config.options['zoom'])
+  img = createMap(N.astype(int), config.options)
+  drawTrack(img, N, config.options)
+  saveMap(img, config.fname)
