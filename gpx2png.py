@@ -142,6 +142,16 @@ def saveMap(img, fname):
   #}}}
 
 
+def createAndSaveMap(X, opts, fname):
+  #{{{
+  N = getTrackTileNumbers(X, opts['zoom'])
+  img = createMap(N.astype(int), opts)
+  drawTrack(img, N, opts)
+  saveMap(img, fname)
+  return fname
+  #}}}
+  
+
 def getURL_mapnik(zoom, x, y):
   #{{{
   assert 0 <= zoom <= 14, 'Mapnik requires zoom-levels 0...18!'
@@ -161,7 +171,9 @@ if '__main__' == __name__:
   from getopt import getopt
   import config
 
-  opts, args = getopt(sys.argv[1:], 'o:w:c:z:p:v')
+  enable_bulk = False
+
+  opts, args = getopt(sys.argv[1:], 'o:w:c:z:p:vbh')
   for opt, val in opts:
     if '-o' == opt: config.fname = val
     elif '-w' == opt: config.options['width'] = int(val)
@@ -169,11 +181,18 @@ if '__main__' == __name__:
     elif '-z' == opt: config.options['zoom'] = int(val)
     elif '-p' == opt: config.perc = float(val)
     elif '-v' == opt: log.getLogger().setLevel(log.INFO)
+    elif '-b' == opt: enable_bulk = True
+    elif '-h' == opt: 
+      print '''Usage: %s [options] FILE...'''
 
-  X = loadFromMultipleFiles(args)
-  X = removeOutliersByPercentile(X, config.perc)
-  
-  N = getTrackTileNumbers(X, config.options['zoom'])
-  img = createMap(N.astype(int), config.options)
-  drawTrack(img, N, config.options)
-  saveMap(img, config.fname)
+  job_list = [loadFromFile(fname) for fname in args]
+  if enable_bulk: job_list = [pd.concat(job_list)] + job_list
+
+  for i, X in enumerate(job_list):
+    print 'Route %i: %s' % (i + (1 - enable_bulk), X.index[0].strftime('%d.%m.%Y %H:%M'))
+    #X = loadFromMultipleFiles(args)
+    X = removeOutliersByPercentile(X, config.perc)
+    name, ext = os.path.splitext(config.fname)
+    fname = '%s_%02i%s' % (name, i + (1 - enable_bulk), ext)
+    createAndSaveMap(X, config.options, fname)
+    print '>> Map: %s' % fname

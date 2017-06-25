@@ -29,3 +29,5 @@ options = dict(
   # Default linewidth of the track
   width = 3,
   )
+
+via_steps = '60Min'
